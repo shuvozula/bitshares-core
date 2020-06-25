@@ -66,10 +66,10 @@
 #include <fc/log/logger.hpp>
 #include <fc/io/json.hpp>
 #include <fc/io/enum_type.hpp>
+#include <fc/io/raw.hpp>
 #include <fc/crypto/rand.hpp>
 #include <fc/network/rate_limiting.hpp>
 #include <fc/network/ip.hpp>
-#include <fc/smart_ref_impl.hpp>
 
 #include <graphene/net/node.hpp>
 #include <graphene/net/peer_database.hpp>
@@ -79,7 +79,11 @@
 #include <graphene/net/exceptions.hpp>
 
 #include <graphene/chain/config.hpp>
-#include <graphene/chain/protocol/fee_schedule.hpp>
+#include <graphene/chain/exceptions.hpp>
+// Nasty hack: A circular dependency around fee_schedule is resolved by fwd-declaring it and using a shared_ptr
+// to it in chain_parameters, which is used in an operation and thus must be serialized by the net library.
+// Resolving that forward declaration doesn't happen until now:
+#include <graphene/protocol/fee_schedule.hpp>
 
 #include <fc/git_revision.hpp>
 
@@ -317,7 +321,7 @@ namespace graphene { namespace net { namespace detail {
       _maximum_blocks_per_peer_during_syncing(GRAPHENE_NET_MAX_BLOCKS_PER_PEER_DURING_SYNCING)
     {
       _rate_limiter.set_actual_rate_time_constant(fc::seconds(2));
-      fc::rand_pseudo_bytes(&_node_id.data[0], (int)_node_id.size());
+      fc::rand_bytes((char*) _node_id.data(), (int)_node_id.size());
     }
 
     node_impl::~node_impl()
@@ -438,7 +442,7 @@ namespace graphene { namespace net { namespace detail {
 #if 0
           try
           {
-            _retrigger_connect_loop_promise = fc::promise<void>::ptr( new fc::promise<void>("graphene::net::retrigger_connect_loop") );
+            _retrigger_connect_loop_promise = fc::promise<void>::create("graphene::net::retrigger_connect_loop");
             if( is_wanting_new_connections() || !_add_once_node_list.empty() )
             {
               if( is_wanting_new_connections() )
@@ -568,7 +572,7 @@ namespace graphene { namespace net { namespace detail {
         if( !_sync_items_to_fetch_updated )
         {
           dlog( "no sync items to fetch right now, going to sleep" );
-          _retrigger_fetch_sync_items_loop_promise = fc::promise<void>::ptr( new fc::promise<void>("graphene::net::retrigger_fetch_sync_items_loop") );
+          _retrigger_fetch_sync_items_loop_promise = fc::promise<void>::create("graphene::net::retrigger_fetch_sync_items_loop");
           _retrigger_fetch_sync_items_loop_promise->wait();
           _retrigger_fetch_sync_items_loop_promise.reset();
         }
@@ -695,7 +699,7 @@ namespace graphene { namespace net { namespace detail {
 
         if (!_items_to_fetch_updated)
         {
-          _retrigger_fetch_item_loop_promise = fc::promise<void>::ptr(new fc::promise<void>("graphene::net::retrigger_fetch_item_loop"));
+          _retrigger_fetch_item_loop_promise = fc::promise<void>::create("graphene::net::retrigger_fetch_item_loop");
           fc::microseconds time_until_retrigger = fc::microseconds::maximum();
           if (next_peer_unblocked_time != fc::time_point::maximum())
             time_until_retrigger = next_peer_unblocked_time - fc::time_point::now();
@@ -750,13 +754,11 @@ namespace graphene { namespace net { namespace detail {
             idump((inventory_to_advertise));
             for (const item_id& item_to_advertise : inventory_to_advertise)
             {
-              if (peer->inventory_advertised_to_peer.find(item_to_advertise) != peer->inventory_advertised_to_peer.end() )
-                 idump((*peer->inventory_advertised_to_peer.find(item_to_advertise)));
-              if (peer->inventory_peer_advertised_to_us.find(item_to_advertise) != peer->inventory_peer_advertised_to_us.end() )
-                 idump((*peer->inventory_peer_advertised_to_us.find(item_to_advertise)));
+               auto adv_to_peer = peer->inventory_advertised_to_peer.find(item_to_advertise);
+               auto adv_to_us   = peer->inventory_peer_advertised_to_us.find(item_to_advertise);
 
-              if (peer->inventory_advertised_to_peer.find(item_to_advertise) == peer->inventory_advertised_to_peer.end() &&
-                  peer->inventory_peer_advertised_to_us.find(item_to_advertise) == peer->inventory_peer_advertised_to_us.end())
+              if (adv_to_peer == peer->inventory_advertised_to_peer.end() &&
+                  adv_to_us == peer->inventory_peer_advertised_to_us.end())
               {
                 items_to_advertise_by_type[item_to_advertise.item_type].push_back(item_to_advertise.item_hash);
                 peer->inventory_advertised_to_peer.insert(peer_connection::timestamped_item_id(item_to_advertise, fc::time_point::now()));
@@ -764,6 +766,13 @@ namespace graphene { namespace net { namespace detail {
                 if (item_to_advertise.item_type == trx_message_type)
                   testnetlog("advertising transaction ${id} to peer ${endpoint}", ("id", item_to_advertise.item_hash)("endpoint", peer->get_remote_endpoint()));
                 dlog("advertising item ${id} to peer ${endpoint}", ("id", item_to_advertise.item_hash)("endpoint", peer->get_remote_endpoint()));
+              }
+              else
+              {
+                 if (adv_to_peer != peer->inventory_advertised_to_peer.end() )
+                    idump( (*adv_to_peer) );
+                 if (adv_to_us != peer->inventory_peer_advertised_to_us.end() )
+                    idump( (*adv_to_us) );
               }
             }
               dlog("advertising ${count} new item(s) of ${types} type(s) to peer ${endpoint}",
@@ -782,7 +791,7 @@ namespace graphene { namespace net { namespace detail {
 
         if (_new_inventory.empty())
         {
-          _retrigger_advertise_inventory_loop_promise = fc::promise<void>::ptr(new fc::promise<void>("graphene::net::retrigger_advertise_inventory_loop"));
+          _retrigger_advertise_inventory_loop_promise = fc::promise<void>::create("graphene::net::retrigger_advertise_inventory_loop");
           _retrigger_advertise_inventory_loop_promise->wait();
           _retrigger_advertise_inventory_loop_promise.reset();
         }
@@ -1250,10 +1259,10 @@ namespace graphene { namespace net { namespace detail {
       VERIFY_CORRECT_THREAD();
       message_hash_type message_hash = received_message.id();
       dlog("handling message ${type} ${hash} size ${size} from peer ${endpoint}",
-           ("type", graphene::net::core_message_type_enum(received_message.msg_type))("hash", message_hash)
+           ("type", graphene::net::core_message_type_enum(received_message.msg_type.value()))("hash", message_hash)
            ("size", received_message.size)
            ("endpoint", originating_peer->get_remote_endpoint()));
-      switch ( received_message.msg_type )
+      switch ( received_message.msg_type.value() )
       {
       case core_message_type_enum::hello_message_type:
         on_hello_message(originating_peer, received_message.as<hello_message>());
@@ -1313,8 +1322,8 @@ namespace graphene { namespace net { namespace detail {
       default:
         // ignore any message in between core_message_type_first and _last that we don't handle above
         // to allow us to add messages in the future
-        if (received_message.msg_type < core_message_type_enum::core_message_type_first ||
-            received_message.msg_type > core_message_type_enum::core_message_type_last)
+        if (received_message.msg_type.value() < core_message_type_enum::core_message_type_first ||
+            received_message.msg_type.value() > core_message_type_enum::core_message_type_last)
           process_ordinary_message(originating_peer, received_message, message_hash);
         break;
       }
@@ -2132,33 +2141,31 @@ namespace graphene { namespace net { namespace detail {
           if (!item_hashes_received.empty() && !originating_peer->ids_of_items_to_get.empty())
             assert(item_hashes_received.front() != originating_peer->ids_of_items_to_get.back());
 
+          // at any given time, there's a maximum number of blocks that can possibly be out there
+          // [(now - genesis time) / block interval].  If they offer us more blocks than that,
+          // they must be an attacker or have a buggy client.
+          fc::time_point_sec minimum_time_of_last_offered_block =
+              originating_peer->last_block_time_delegate_has_seen + // timestamp of the block immediately before the first unfetched block
+              originating_peer->number_of_unfetched_item_ids * GRAPHENE_MIN_BLOCK_INTERVAL;
+          fc::time_point_sec now = fc::time_point::now();
+          if (minimum_time_of_last_offered_block > now + GRAPHENE_NET_FUTURE_SYNC_BLOCKS_GRACE_PERIOD_SEC)
+          {
+            wlog("Disconnecting from peer ${peer} who offered us an implausible number of blocks, their last block would be in the future (${timestamp})",
+                 ("peer", originating_peer->get_remote_endpoint())
+                 ("timestamp", minimum_time_of_last_offered_block));
+            fc::exception error_for_peer(FC_LOG_MESSAGE(error, "You offered me a list of more sync blocks than could possibly exist.  Total blocks offered: ${blocks}, Minimum time of the last block you offered: ${minimum_time_of_last_offered_block}, Now: ${now}",
+                                                        ("blocks", originating_peer->number_of_unfetched_item_ids)
+                                                        ("minimum_time_of_last_offered_block", minimum_time_of_last_offered_block)
+                                                        ("now", now)));
+            disconnect_from_peer(originating_peer,
+                                 "You offered me a list of more sync blocks than could possibly exist",
+                                 true, error_for_peer);
+            return;
+          }
+
           // append the remaining items to the peer's list
           boost::push_back(originating_peer->ids_of_items_to_get, item_hashes_received);
-
-          originating_peer->number_of_unfetched_item_ids = blockchain_item_ids_inventory_message_received.total_remaining_item_count;
-
-        // at any given time, there's a maximum number of blocks that can possibly be out there
-        // [(now - genesis time) / block interval].  If they offer us more blocks than that,
-        // they must be an attacker or have a buggy client.
-        fc::time_point_sec minimum_time_of_last_offered_block =
-            originating_peer->last_block_time_delegate_has_seen + // timestamp of the block immediately before the first unfetched block
-            originating_peer->number_of_unfetched_item_ids * GRAPHENE_MIN_BLOCK_INTERVAL;
-        fc::time_point_sec now = fc::time_point::now();
-        if (minimum_time_of_last_offered_block > now + GRAPHENE_NET_FUTURE_SYNC_BLOCKS_GRACE_PERIOD_SEC)
-        {
-          wlog("Disconnecting from peer ${peer} who offered us an implausible number of blocks, their last block would be in the future (${timestamp})",
-               ("peer", originating_peer->get_remote_endpoint())
-               ("timestamp", minimum_time_of_last_offered_block));
-          fc::exception error_for_peer(FC_LOG_MESSAGE(error, "You offered me a list of more sync blocks than could possibly exist.  Total blocks offered: ${blocks}, Minimum time of the last block you offered: ${minimum_time_of_last_offered_block}, Now: ${now}",
-                                                      ("blocks", originating_peer->number_of_unfetched_item_ids)
-                                                      ("minimum_time_of_last_offered_block", minimum_time_of_last_offered_block)
-                                                      ("now", now)));
-          disconnect_from_peer(originating_peer,
-                               "You offered me a list of more sync blocks than could possibly exist",
-                               true, error_for_peer);
-          return;
-        }
-
+          
           uint32_t new_number_of_unfetched_items = calculate_unsynced_block_count_from_all_peers();
           if (new_number_of_unfetched_items != _total_number_of_unfetched_items)
             _delegate->sync_status(blockchain_item_ids_inventory_message_received.item_type,
@@ -2301,7 +2308,7 @@ namespace graphene { namespace net { namespace detail {
 
       for (const message& reply : reply_messages)
       {
-        if (reply.msg_type == block_message_type)
+        if (reply.msg_type.value() == block_message_type)
           originating_peer->send_item(item_id(block_message_type, reply.as<graphene::net::block_message>().block_id));
         else
           originating_peer->send_message(reply);
@@ -2411,7 +2418,8 @@ namespace graphene { namespace net { namespace detail {
 
     }
 
-    void node_impl::on_closing_connection_message( peer_connection* originating_peer, const closing_connection_message& closing_connection_message_received )
+    void node_impl::on_closing_connection_message( peer_connection* originating_peer,
+          const closing_connection_message& closing_connection_message_received )
     {
       VERIFY_CORRECT_THREAD();
       originating_peer->they_have_requested_close = true;
@@ -2423,12 +2431,14 @@ namespace graphene { namespace net { namespace detail {
              ( "msg", closing_connection_message_received.reason_for_closing )
              ( "error", closing_connection_message_received.error ) );
         std::ostringstream message;
-        message << "Peer " << fc::variant( originating_peer->get_remote_endpoint(), GRAPHENE_NET_MAX_NESTED_OBJECTS ).as_string() <<
+        message << "Peer " << fc::variant( originating_peer->get_remote_endpoint(),
+                                           GRAPHENE_NET_MAX_NESTED_OBJECTS ).as_string() <<
                   " disconnected us: " << closing_connection_message_received.reason_for_closing;
-        fc::exception detailed_error(FC_LOG_MESSAGE(warn, "Peer ${peer} is disconnecting us because of an error: ${msg}, exception: ${error}",
-                                                    ( "peer", originating_peer->get_remote_endpoint() )
-                                                    ( "msg", closing_connection_message_received.reason_for_closing )
-                                                    ( "error", closing_connection_message_received.error ) ));
+        fc::exception detailed_error(FC_LOG_MESSAGE(warn,
+              "Peer ${peer} is disconnecting us because of an error: ${msg}, exception: ${error}",
+              ( "peer", originating_peer->get_remote_endpoint() )
+              ( "msg", closing_connection_message_received.reason_for_closing )
+              ( "error", closing_connection_message_received.error ) ));
         _delegate->error_encountered( message.str(),
                                       detailed_error );
       }
@@ -2565,11 +2575,20 @@ namespace graphene { namespace net { namespace detail {
       }
       catch (const fc::exception& e)
       {
+        auto block_num = block_message_to_send.block.block_num();
         wlog("Failed to push sync block ${num} (id:${id}): client rejected sync block sent by peer: ${e}",
-             ("num", block_message_to_send.block.block_num())
+             ("num", block_num)
              ("id", block_message_to_send.block_id)
              ("e", e));
-        handle_message_exception = e;
+        if( e.code() == block_timestamp_in_future_exception::code_enum::code_value )
+        {
+           handle_message_exception = block_timestamp_in_future_exception( FC_LOG_MESSAGE( warn, "",
+                ("block_header", static_cast<graphene::protocol::block_header>(block_message_to_send.block))
+                ("block_num", block_num)
+                ("block_id", block_message_to_send.block_id) ) );
+        }
+        else
+           handle_message_exception = e;
       }
 
       // build up lists for any potentially-blocking operations we need to do, then do them
@@ -2661,7 +2680,8 @@ namespace graphene { namespace net { namespace detail {
         {
           ASSERT_TASK_NOT_PREEMPTED(); // don't yield while iterating over _active_connections
 
-          if (peer->ids_of_items_being_processed.find(block_message_to_send.block_id) != peer->ids_of_items_being_processed.end())
+          if (peer->ids_of_items_being_processed.find(block_message_to_send.block_id)
+                 != peer->ids_of_items_being_processed.end())
           {
             if (discontinue_fetching_blocks_from_peer)
             {
@@ -2670,7 +2690,9 @@ namespace graphene { namespace net { namespace detail {
               peer->inhibit_fetching_sync_blocks = true;
             }
             else
-              peers_to_disconnect[peer] = std::make_pair(std::string("You offered us a block that we reject as invalid"), fc::oexception(handle_message_exception));
+              peers_to_disconnect[peer] = std::make_pair(
+                    std::string("You offered us a block that we reject as invalid"),
+                    fc::oexception(handle_message_exception));
           }
         }
       }
@@ -2979,11 +3001,21 @@ namespace graphene { namespace net { namespace detail {
       catch (const fc::exception& e)
       {
         // client rejected the block.  Disconnect the client and any other clients that offered us this block
-        wlog("Failed to push block ${num} (id:${id}), client rejected block sent by peer",
-              ("num", block_message_to_process.block.block_num())
-              ("id", block_message_to_process.block_id));
+        auto block_num = block_message_to_process.block.block_num();
+        wlog("Failed to push block ${num} (id:${id}), client rejected block sent by peer: ${e}",
+              ("num", block_num)
+              ("id", block_message_to_process.block_id)
+              ("e",e));
 
-        disconnect_exception = e;
+        if( e.code() == block_timestamp_in_future_exception::code_enum::code_value )
+        {
+           disconnect_exception = block_timestamp_in_future_exception( FC_LOG_MESSAGE( warn, "",
+                ("block_header", static_cast<graphene::protocol::block_header>(block_message_to_process.block))
+                ("block_num", block_num)
+                ("block_id", block_message_to_process.block_id) ) );
+        }
+        else
+           disconnect_exception = e;
         disconnect_reason = "You offered me a block that I have deemed to be invalid";
 
         peers_to_disconnect.insert( originating_peer->shared_from_this() );
@@ -3340,7 +3372,7 @@ namespace graphene { namespace net { namespace detail {
     }
 
     void node_impl::on_get_current_connections_reply_message(peer_connection* originating_peer,
-                                                             const get_current_connections_reply_message& get_current_connections_reply_message_received)
+          const get_current_connections_reply_message& get_current_connections_reply_message_received)
     {
       VERIFY_CORRECT_THREAD();
     }
@@ -3352,19 +3384,22 @@ namespace graphene { namespace net { namespace detail {
     // this just passes the message to the client, and does the bookkeeping
     // related to requesting and rebroadcasting the message.
     void node_impl::process_ordinary_message( peer_connection* originating_peer,
-                                              const message& message_to_process, const message_hash_type& message_hash )
+                                              const message& message_to_process,
+                                              const message_hash_type& message_hash )
     {
       VERIFY_CORRECT_THREAD();
       fc::time_point message_receive_time = fc::time_point::now();
 
       // only process it if we asked for it
-      auto iter = originating_peer->items_requested_from_peer.find( item_id(message_to_process.msg_type, message_hash) );
+      auto iter = originating_peer->items_requested_from_peer.find(
+                        item_id(message_to_process.msg_type.value(), message_hash) );
       if( iter == originating_peer->items_requested_from_peer.end() )
       {
         wlog( "received a message I didn't ask for from peer ${endpoint}, disconnecting from peer",
              ( "endpoint", originating_peer->get_remote_endpoint() ) );
-        fc::exception detailed_error( FC_LOG_MESSAGE(error, "You sent me a message that I didn't ask for, message_hash: ${message_hash}",
-                                                    ( "message_hash", message_hash ) ) );
+        fc::exception detailed_error( FC_LOG_MESSAGE(error,
+                            "You sent me a message that I didn't ask for, message_hash: ${message_hash}",
+                            ( "message_hash", message_hash ) ) );
         disconnect_from_peer( originating_peer, "You sent me a message that I didn't request", true, detailed_error );
         return;
       }
@@ -3378,10 +3413,11 @@ namespace graphene { namespace net { namespace detail {
         fc::time_point message_validated_time;
         try
         {
-          if (message_to_process.msg_type == trx_message_type)
+          if (message_to_process.msg_type.value() == trx_message_type)
           {
             trx_message transaction_message_to_process = message_to_process.as<trx_message>();
-            dlog("passing message containing transaction ${trx} to client", ("trx", transaction_message_to_process.trx.id()));
+            dlog( "passing message containing transaction ${trx} to client",
+                  ("trx", transaction_message_to_process.trx.id()) );
             _delegate->handle_transaction(transaction_message_to_process);
           }
           else
@@ -3394,14 +3430,36 @@ namespace graphene { namespace net { namespace detail {
         }
         catch ( const fc::exception& e )
         {
-          wlog( "client rejected message sent by peer ${peer}, ${e}", ("peer", originating_peer->get_remote_endpoint() )("e", e) );
+          switch( e.code() )
+          {
+          // log common exceptions in debug level
+          case graphene::chain::duplicate_transaction::code_enum::code_value :
+          case graphene::chain::limit_order_create_kill_unfilled::code_enum::code_value :
+          case graphene::chain::limit_order_create_market_not_whitelisted::code_enum::code_value :
+          case graphene::chain::limit_order_create_market_blacklisted::code_enum::code_value :
+          case graphene::chain::limit_order_create_selling_asset_unauthorized::code_enum::code_value :
+          case graphene::chain::limit_order_create_receiving_asset_unauthorized::code_enum::code_value :
+          case graphene::chain::limit_order_create_insufficient_balance::code_enum::code_value :
+          case graphene::chain::limit_order_cancel_nonexist_order::code_enum::code_value :
+          case graphene::chain::limit_order_cancel_owner_mismatch::code_enum::code_value :
+             dlog( "client rejected message sent by peer ${peer}, ${e}",
+                   ("peer", originating_peer->get_remote_endpoint() )("e", e) );
+             break;
+          // log rarer exceptions in warn level
+          default:
+             wlog( "client rejected message sent by peer ${peer}, ${e}",
+                   ("peer", originating_peer->get_remote_endpoint() )("e", e) );
+             break;
+          }
           // record it so we don't try to fetch this item again
-          _recently_failed_items.insert(peer_connection::timestamped_item_id(item_id(message_to_process.msg_type, message_hash ), fc::time_point::now()));
+          _recently_failed_items.insert( peer_connection::timestamped_item_id(
+                item_id( message_to_process.msg_type.value(), message_hash ), fc::time_point::now() ) );
           return;
         }
 
         // finally, if the delegate validated the message, broadcast it to our other peers
-        message_propagation_data propagation_data{message_receive_time, message_validated_time, originating_peer->node_id};
+        message_propagation_data propagation_data { message_receive_time, message_validated_time,
+                                                    originating_peer->node_id };
         broadcast( message_to_process, propagation_data );
       }
     }
@@ -4429,13 +4487,13 @@ namespace graphene { namespace net { namespace detail {
     {
       VERIFY_CORRECT_THREAD();
       fc::uint160_t hash_of_message_contents;
-      if( item_to_broadcast.msg_type == graphene::net::block_message_type )
+      if( item_to_broadcast.msg_type.value() == graphene::net::block_message_type )
       {
         graphene::net::block_message block_message_to_broadcast = item_to_broadcast.as<graphene::net::block_message>();
         hash_of_message_contents = block_message_to_broadcast.block_id; // for debugging
         _most_recent_blocks_accepted.push_back( block_message_to_broadcast.block_id );
       }
-      else if( item_to_broadcast.msg_type == graphene::net::trx_message_type )
+      else if( item_to_broadcast.msg_type.value() == graphene::net::trx_message_type )
       {
         graphene::net::trx_message transaction_message_to_broadcast = item_to_broadcast.as<graphene::net::trx_message>();
         hash_of_message_contents = transaction_message_to_broadcast.trx.id(); // for debugging
@@ -4444,7 +4502,7 @@ namespace graphene { namespace net { namespace detail {
       message_hash_type hash_of_item_to_broadcast = item_to_broadcast.id();
 
       _message_cache.cache_message( item_to_broadcast, hash_of_item_to_broadcast, propagation_data, hash_of_message_contents );
-      _new_inventory.insert( item_id(item_to_broadcast.msg_type, hash_of_item_to_broadcast ) );
+      _new_inventory.insert( item_id(item_to_broadcast.msg_type.value(), hash_of_item_to_broadcast ) );
       trigger_advertise_inventory_loop();
     }
 
@@ -4822,9 +4880,9 @@ namespace graphene { namespace net { namespace detail {
       try
       {
         const message& message_to_deliver = destination_node->messages_to_deliver.front();
-        if (message_to_deliver.msg_type == trx_message_type)
+        if (message_to_deliver.msg_type.value() == trx_message_type)
           destination_node->delegate->handle_transaction(message_to_deliver.as<trx_message>());
-        else if (message_to_deliver.msg_type == block_message_type)
+        else if (message_to_deliver.msg_type.value() == block_message_type)
         {
           std::vector<fc::uint160_t> contained_transaction_message_ids;
           destination_node->delegate->handle_block(message_to_deliver.as<block_message>(), false, contained_transaction_message_ids);
@@ -4907,7 +4965,8 @@ namespace graphene { namespace net { namespace detail {
 #  define INVOKE_AND_COLLECT_STATISTICS(method_name, ...) \
     try \
     { \
-      call_statistics_collector statistics_collector(#method_name, \
+      std::shared_ptr<call_statistics_collector> statistics_collector = std::make_shared<call_statistics_collector>( \
+                                                     #method_name, \
                                                      &_ ## method_name ## _execution_accumulator, \
                                                      &_ ## method_name ## _delay_before_accumulator, \
                                                      &_ ## method_name ## _delay_after_accumulator); \
@@ -4917,7 +4976,7 @@ namespace graphene { namespace net { namespace detail {
         return _node_delegate->method_name(__VA_ARGS__); \
       } \
       else \
-        return _thread->async([&](){ \
+        return _thread->async([&, statistics_collector](){ \
           call_statistics_collector::actual_execution_measurement_helper helper(statistics_collector); \
           return _node_delegate->method_name(__VA_ARGS__); \
         }, "invoke " BOOST_STRINGIZE(method_name)).wait(); \
@@ -4939,7 +4998,8 @@ namespace graphene { namespace net { namespace detail {
     }
 #else
 #  define INVOKE_AND_COLLECT_STATISTICS(method_name, ...) \
-    call_statistics_collector statistics_collector(#method_name, \
+    std::shared_ptr<call_statistics_collector> statistics_collector = std::make_shared<call_statistics_collector>( \
+                                                   #method_name, \
                                                    &_ ## method_name ## _execution_accumulator, \
                                                    &_ ## method_name ## _delay_before_accumulator, \
                                                    &_ ## method_name ## _delay_after_accumulator); \
@@ -4949,7 +5009,7 @@ namespace graphene { namespace net { namespace detail {
       return _node_delegate->method_name(__VA_ARGS__); \
     } \
     else \
-      return _thread->async([&](){ \
+      return _thread->async([&, statistics_collector](){ \
         call_statistics_collector::actual_execution_measurement_helper helper(statistics_collector); \
         return _node_delegate->method_name(__VA_ARGS__); \
       }, "invoke " BOOST_STRINGIZE(method_name)).wait()

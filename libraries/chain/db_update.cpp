@@ -28,46 +28,27 @@
 #include <graphene/chain/asset_object.hpp>
 #include <graphene/chain/global_property_object.hpp>
 #include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/htlc_object.hpp>
 #include <graphene/chain/market_object.hpp>
 #include <graphene/chain/proposal_object.hpp>
-#include <graphene/chain/transaction_object.hpp>
+#include <graphene/chain/transaction_history_object.hpp>
 #include <graphene/chain/withdraw_permission_object.hpp>
 #include <graphene/chain/witness_object.hpp>
 
-#include <graphene/chain/protocol/fee_schedule.hpp>
-
-#include <fc/uint128.hpp>
+#include <graphene/protocol/fee_schedule.hpp>
 
 namespace graphene { namespace chain {
 
-void database::update_global_dynamic_data( const signed_block& b )
+void database::update_global_dynamic_data( const signed_block& b, const uint32_t missed_blocks )
 {
-   const dynamic_global_property_object& _dgp =
-      dynamic_global_property_id_type(0)(*this);
-
-   uint32_t missed_blocks = get_slot_at_time( b.timestamp );
-   assert( missed_blocks != 0 );
-   missed_blocks--;
-   for( uint32_t i = 0; i < missed_blocks; ++i ) {
-      const auto& witness_missed = get_scheduled_witness( i+1 )(*this);
-      if(  witness_missed.id != b.witness ) {
-         /*
-         const auto& witness_account = witness_missed.witness_account(*this);
-         if( (fc::time_point::now() - b.timestamp) < fc::seconds(30) )
-            wlog( "Witness ${name} missed block ${n} around ${t}", ("name",witness_account.name)("n",b.block_num())("t",b.timestamp) );
-            */
-
-         modify( witness_missed, [&]( witness_object& w ) {
-           w.total_missed++;
-         });
-      } 
-   }
+   const dynamic_global_property_object& _dgp = get_dynamic_global_properties();
 
    // dynamic global properties updating
-   modify( _dgp, [&]( dynamic_global_property_object& dgp ){
-      if( BOOST_UNLIKELY( b.block_num() == 1 ) )
+   modify( _dgp, [&b,this,missed_blocks]( dynamic_global_property_object& dgp ){
+      const uint32_t block_num = b.block_num();
+      if( BOOST_UNLIKELY( block_num == 1 ) )
          dgp.recently_missed_count = 0;
-         else if( _checkpoints.size() && _checkpoints.rbegin()->first >= b.block_num() )
+      else if( _checkpoints.size() && _checkpoints.rbegin()->first >= block_num )
          dgp.recently_missed_count = 0;
       else if( missed_blocks )
          dgp.recently_missed_count += GRAPHENE_RECENTLY_MISSED_COUNT_INCREMENT*missed_blocks;
@@ -76,7 +57,7 @@ void database::update_global_dynamic_data( const signed_block& b )
       else if( dgp.recently_missed_count > 0 )
          dgp.recently_missed_count--;
 
-      dgp.head_block_number = b.block_num();
+      dgp.head_block_number = block_num;
       dgp.head_block_id = b.id();
       dgp.time = b.timestamp;
       dgp.current_witness = b.witness;
@@ -126,6 +107,7 @@ void database::update_last_irreversible_block()
    const global_property_object& gpo = get_global_properties();
    const dynamic_global_property_object& dpo = get_dynamic_global_properties();
 
+   // TODO for better performance, move this to db_maint, because only need to do it once per maintenance interval
    vector< const witness_object* > wit_objs;
    wit_objs.reserve( gpo.active_witnesses.size() );
    for( const witness_id_type& wid : gpo.active_witnesses )
@@ -133,9 +115,10 @@ void database::update_last_irreversible_block()
 
    static_assert( GRAPHENE_IRREVERSIBLE_THRESHOLD > 0, "irreversible threshold must be nonzero" );
 
-   // 1 1 1 2 2 2 2 2 2 2 -> 2     .7*10 = 7
+   // 1 1 1 2 2 2 2 2 2 2 -> 2     .3*10 = 3
    // 1 1 1 1 1 1 1 2 2 2 -> 1
    // 3 3 3 3 3 3 3 3 3 3 -> 3
+   // 3 3 3 4 4 4 4 4 4 4 -> 4
 
    size_t offset = ((GRAPHENE_100_PERCENT - GRAPHENE_IRREVERSIBLE_THRESHOLD) * wit_objs.size() / GRAPHENE_100_PERCENT);
 
@@ -160,7 +143,8 @@ void database::clear_expired_transactions()
 { try {
    //Look for expired transactions in the deduplication list, and remove them.
    //Transactions must have expired by at least two forking windows in order to be removed.
-   auto& transaction_idx = static_cast<transaction_index&>(get_mutable_index(implementation_ids, impl_transaction_object_type));
+   auto& transaction_idx = static_cast<transaction_index&>(get_mutable_index(implementation_ids,
+                                                                             impl_transaction_history_object_type));
    const auto& dedupe_index = transaction_idx.indices().get<by_expiration>();
    while( (!dedupe_index.empty()) && (head_block_time() > dedupe_index.begin()->trx.expiration) )
       transaction_idx.remove(*dedupe_index.begin());
@@ -197,31 +181,50 @@ void database::clear_expired_proposals()
  *
  *  A black swan occurs if MAX(HB,SP) <= LC
  */
-bool database::check_for_blackswan( const asset_object& mia, bool enable_black_swan )
+bool database::check_for_blackswan( const asset_object& mia, bool enable_black_swan,
+                                    const asset_bitasset_data_object* bitasset_ptr )
 {
     if( !mia.is_market_issued() ) return false;
 
-    const asset_bitasset_data_object& bitasset = mia.bitasset_data(*this);
+    const asset_bitasset_data_object& bitasset = ( bitasset_ptr ? *bitasset_ptr : mia.bitasset_data(*this) );
     if( bitasset.has_settlement() ) return true; // already force settled
     auto settle_price = bitasset.current_feed.settlement_price;
     if( settle_price.is_null() ) return false; // no feed
 
-    const call_order_index& call_index = get_index_type<call_order_index>();
-    const auto& call_price_index = call_index.indices().get<by_price>();
+    const call_order_object* call_ptr = nullptr; // place holder for the call order with least collateral ratio
 
-    auto call_min = price::min( bitasset.options.short_backing_asset, mia.id );
-    auto call_max = price::max( bitasset.options.short_backing_asset, mia.id );
-    auto call_itr = call_price_index.lower_bound( call_min );
-    auto call_end = call_price_index.upper_bound( call_max );
-
-    if( call_itr == call_end ) return false;  // no call orders
-
-    price highest = settle_price;
+    asset_id_type debt_asset_id = mia.id;
+    auto call_min = price::min( bitasset.options.short_backing_asset, debt_asset_id );
 
     auto maint_time = get_dynamic_global_properties().next_maintenance_time;
-    if( maint_time > HARDFORK_CORE_338_TIME )
+    bool before_core_hardfork_1270 = ( maint_time <= HARDFORK_CORE_1270_TIME ); // call price caching issue
+
+    if( before_core_hardfork_1270 ) // before core-1270 hard fork, check with call_price
+    {
+       const auto& call_price_index = get_index_type<call_order_index>().indices().get<by_price>();
+       auto call_itr = call_price_index.lower_bound( call_min );
+       if( call_itr == call_price_index.end() ) // no call order
+          return false;
+       call_ptr = &(*call_itr);
+    }
+    else // after core-1270 hard fork, check with collateralization
+    {
+       const auto& call_collateral_index = get_index_type<call_order_index>().indices().get<by_collateral>();
+       auto call_itr = call_collateral_index.lower_bound( call_min );
+       if( call_itr == call_collateral_index.end() ) // no call order
+          return false;
+       call_ptr = &(*call_itr);
+    }
+    if( call_ptr->debt_type() != debt_asset_id ) // no call order
+       return false;
+
+    price highest = settle_price;
+    if( maint_time > HARDFORK_CORE_1270_TIME )
        // due to #338, we won't check for black swan on incoming limit order, so need to check with MSSP here
        highest = bitasset.current_feed.max_short_squeeze_price();
+    else if( maint_time > HARDFORK_CORE_338_TIME )
+       // due to #338, we won't check for black swan on incoming limit order, so need to check with MSSP here
+       highest = bitasset.current_feed.max_short_squeeze_price_before_hf_1270();
 
     const limit_order_index& limit_index = get_index_type<limit_order_index>();
     const auto& limit_price_index = limit_index.indices().get<by_price>();
@@ -241,10 +244,10 @@ bool database::check_for_blackswan( const asset_object& mia, bool enable_black_s
        highest = std::max( limit_itr->sell_price, highest );
     }
 
-    auto least_collateral = call_itr->collateralization();
+    auto least_collateral = call_ptr->collateralization();
     if( ~least_collateral >= highest  ) 
     {
-       wdump( (*call_itr) );
+       wdump( (*call_ptr) );
        elog( "Black Swan detected on asset ${symbol} (${id}) at block ${b}: \n"
              "   Least collateralized call: ${lc}  ${~lc}\n"
            //  "   Highest Bid:               ${hb}  ${~hb}\n"
@@ -376,6 +379,13 @@ void database::clear_expired_orders()
             cancel_settle_order(order);
             continue;
          }
+         if( GRAPHENE_100_PERCENT == mia.options.force_settlement_offset_percent ) // settle something for nothing
+         {
+            ilog( "Canceling a force settlement in ${asset} because settlement offset is 100%",
+                  ("asset", mia_object.symbol));
+            cancel_settle_order(order);
+            continue;
+         }
          if( max_settlement_volume.asset_id != current_asset )
             max_settlement_volume = mia_object.amount(mia.max_force_settlement_volume(mia_object.dynamic_data(*this).current_supply));
          // When current_asset_finished is true, this would be the 2nd time processing the same order.
@@ -407,9 +417,9 @@ void database::clear_expired_orders()
          {
             auto& pays = order.balance;
             auto receives = (order.balance * mia.current_feed.settlement_price);
-            receives.amount = ( fc::uint128_t(receives.amount.value) *
+            receives.amount = static_cast<uint64_t>( fc::uint128_t(receives.amount.value) *
                                 (GRAPHENE_100_PERCENT - mia.options.force_settlement_offset_percent) /
-                                GRAPHENE_100_PERCENT ).to_uint64();
+                                GRAPHENE_100_PERCENT );
             assert(receives <= order.balance * mia.current_feed.settlement_price);
             settlement_price = pays / receives;
          }
@@ -472,32 +482,85 @@ void database::clear_expired_orders()
 
 void database::update_expired_feeds()
 {
-   auto& asset_idx = get_index_type<asset_index>().indices().get<by_type>();
-   auto itr = asset_idx.lower_bound( true /** market issued */ );
-   while( itr != asset_idx.end() )
-   {
-      const asset_object& a = *itr;
-      ++itr;
-      assert( a.is_market_issued() );
+   const auto head_time = head_block_time();
+   const auto next_maint_time = get_dynamic_global_properties().next_maintenance_time;
+   bool after_hardfork_615 = ( head_time >= HARDFORK_615_TIME );
 
-      const asset_bitasset_data_object& b = a.bitasset_data(*this);
-      bool feed_is_expired;
-      if( head_block_time() < HARDFORK_615_TIME )
-         feed_is_expired = b.feed_is_expired_before_hardfork_615( head_block_time() );
-      else
-         feed_is_expired = b.feed_is_expired( head_block_time() );
-      if( feed_is_expired )
+   const auto& idx = get_index_type<asset_bitasset_data_index>().indices().get<by_feed_expiration>();
+   auto itr = idx.begin();
+   while( itr != idx.end() && itr->feed_is_expired( head_time ) )
+   {
+      const asset_bitasset_data_object& b = *itr;
+      ++itr; // not always process begin() because old code skipped updating some assets before hf 615
+      bool update_cer = false; // for better performance, to only update bitasset once, also check CER in this function
+      const asset_object* asset_ptr = nullptr;
+      // update feeds, check margin calls
+      if( after_hardfork_615 || b.feed_is_expired_before_hardfork_615( head_time ) )
       {
-         modify(b, [this](asset_bitasset_data_object& a) {
-            a.update_median_feeds(head_block_time());
+         auto old_median_feed = b.current_feed;
+         modify( b, [head_time,next_maint_time,&update_cer]( asset_bitasset_data_object& abdo )
+         {
+            abdo.update_median_feeds( head_time, next_maint_time );
+            if( abdo.need_to_update_cer() )
+            {
+               update_cer = true;
+               abdo.asset_cer_updated = false;
+               abdo.feed_cer_updated = false;
+            }
          });
-         check_call_orders(b.current_feed.settlement_price.base.asset_id(*this));
+         if( !b.current_feed.settlement_price.is_null() && !( b.current_feed == old_median_feed ) ) // `==` check is safe here
+         {
+            asset_ptr = &b.asset_id( *this );
+            check_call_orders( *asset_ptr, true, false, &b );
+         }
       }
-      if( !b.current_feed.core_exchange_rate.is_null() &&
-          a.options.core_exchange_rate != b.current_feed.core_exchange_rate )
-         modify(a, [&b](asset_object& a) {
-            a.options.core_exchange_rate = b.current_feed.core_exchange_rate;
+      // update CER
+      if( update_cer )
+      {
+         if( !asset_ptr )
+            asset_ptr = &b.asset_id( *this );
+         if( asset_ptr->options.core_exchange_rate != b.current_feed.core_exchange_rate )
+         {
+            modify( *asset_ptr, [&b]( asset_object& ao )
+            {
+               ao.options.core_exchange_rate = b.current_feed.core_exchange_rate;
+            });
+         }
+      }
+   } // for each asset whose feed is expired
+
+   // process assets affected by bitshares-core issue 453 before hard fork 615
+   if( !after_hardfork_615 )
+   {
+      for( asset_id_type a : _issue_453_affected_assets )
+      {
+         check_call_orders( a(*this) );
+      }
+   }
+}
+
+void database::update_core_exchange_rates()
+{
+   const auto& idx = get_index_type<asset_bitasset_data_index>().indices().get<by_cer_update>();
+   if( idx.begin() != idx.end() )
+   {
+      for( auto itr = idx.rbegin(); itr->need_to_update_cer(); itr = idx.rbegin() )
+      {
+         const asset_bitasset_data_object& b = *itr;
+         const asset_object& a = b.asset_id( *this );
+         if( a.options.core_exchange_rate != b.current_feed.core_exchange_rate )
+         {
+            modify( a, [&b]( asset_object& ao )
+            {
+               ao.options.core_exchange_rate = b.current_feed.core_exchange_rate;
+            });
+         }
+         modify( b, []( asset_bitasset_data_object& abdo )
+         {
+            abdo.asset_cer_updated = false;
+            abdo.feed_cer_updated = false;
          });
+      }
    }
 }
 
@@ -518,6 +581,24 @@ void database::update_withdraw_permissions()
    auto& permit_index = get_index_type<withdraw_permission_index>().indices().get<by_expiration>();
    while( !permit_index.empty() && permit_index.begin()->expiration <= head_block_time() )
       remove(*permit_index.begin());
+}
+
+void database::clear_expired_htlcs()
+{
+   const auto& htlc_idx = get_index_type<htlc_index>().indices().get<by_expiration>();
+   while ( htlc_idx.begin() != htlc_idx.end()
+         && htlc_idx.begin()->conditions.time_lock.expiration <= head_block_time() )
+   {
+      const htlc_object& obj = *htlc_idx.begin();
+      adjust_balance( obj.transfer.from, asset(obj.transfer.amount, obj.transfer.asset_id) );
+      // virtual op
+      htlc_refund_operation vop( obj.id, obj.transfer.from );
+      vop.htlc_id = htlc_idx.begin()->id;
+      push_applied_operation( vop );
+
+      // remove the db object
+      remove( *htlc_idx.begin() );
+   }
 }
 
 } }

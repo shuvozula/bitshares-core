@@ -26,9 +26,10 @@
 #include <graphene/app/application.hpp>
 #include <graphene/app/plugin.hpp>
 
+#include <graphene/chain/db_with.hpp>
 #include <graphene/chain/genesis_state.hpp>
-#include <graphene/chain/protocol/fee_schedule.hpp>
-#include <graphene/chain/protocol/types.hpp>
+#include <graphene/protocol/fee_schedule.hpp>
+#include <graphene/protocol/types.hpp>
 
 #include <graphene/egenesis/egenesis.hpp>
 
@@ -37,8 +38,6 @@
 
 #include <graphene/utilities/key_conversion.hpp>
 #include <graphene/chain/worker_evaluator.hpp>
-
-#include <fc/smart_ref_impl.hpp>
 
 #include <fc/asio.hpp>
 #include <fc/io/fstream.hpp>
@@ -82,7 +81,7 @@ namespace detail {
       auto nathan_key = fc::ecc::private_key::regenerate(fc::sha256::hash(string("nathan")));
       dlog("Allocating all stake to ${key}", ("key", utilities::key_to_wif(nathan_key)));
       graphene::chain::genesis_state_type initial_state;
-      initial_state.initial_parameters.current_fees = fee_schedule::get_default();//->set_all_fees(GRAPHENE_BLOCKCHAIN_PRECISION);
+      initial_state.initial_parameters.get_mutable_fees() = fee_schedule::get_default();
       initial_state.initial_active_witnesses = GRAPHENE_DEFAULT_MIN_WITNESS_COUNT;
       initial_state.initial_timestamp = time_point_sec(time_point::now().sec_since_epoch() /
             initial_state.initial_parameters.block_interval *
@@ -166,23 +165,7 @@ void application_impl::reset_p2p_node(const fc::path& data_dir)
    {
       // https://bitsharestalk.org/index.php/topic,23715.0.html
       vector<string> seeds = {
-         "104.236.144.84:1777",               // puppies      (USA)
-         "128.199.143.47:2015",               // Harvey       (Singapore)
-         "23.92.53.182:1776",                 // sahkan       (USA)
-         "192.121.166.162:1776",              // sahkan       (UK)
-         "51.15.61.160:1776",                 // lafona       (France)
-         "bts-seed1.abit-more.com:62015",     // abit         (China)
-         "node.blckchnd.com:4243",            // blckchnd     (Germany)
-         "seed.bitsharesdex.com:50696",       // iHashFury    (Europe)
-         "seed.bitsharesnodes.com:1776",      // wackou       (Netherlands)
-         "seed.blocktrades.us:1776",          // BlockTrades  (USA)
-         "seed.cubeconnex.com:1777",          // cube         (USA)
-         "seed.roelandp.nl:1776",             // roelandp     (Canada)
-         "seed04.bts-nodes.net:1776",         // Thom         (Australia)
-         "seed05.bts-nodes.net:1776",          // Thom         (USA)
-         "seed06.bts-nodes.net:1776",          // Thom         (USA)
-         "seed07.bts-nodes.net:1776",          // Thom         (Singapore)
-         "seeds.bitshares.eu:1776"            // pc           (http://seeds.quisquis.de/bitshares.html)
+         #include "../egenesis/seed-nodes.txt"
       };
       for( const string& endpoint_string : seeds )
       {
@@ -245,7 +228,7 @@ std::vector<fc::ip::endpoint> application_impl::resolve_string_to_ip_endpoints(c
 
 void application_impl::new_connection( const fc::http::websocket_connection_ptr& c )
 {
-   auto wsc = std::make_shared<fc::rpc::websocket_api_connection>(*c, GRAPHENE_NET_MAX_NESTED_OBJECTS);
+   auto wsc = std::make_shared<fc::rpc::websocket_api_connection>(c, GRAPHENE_NET_MAX_NESTED_OBJECTS);
    auto login = std::make_shared<graphene::app::login_api>( std::ref(*_self) );
    login->enable_api("database_api");
 
@@ -315,6 +298,59 @@ void application_impl::set_dbg_init_key( graphene::chain::genesis_state_type& ge
       genesis.initial_witness_candidates[i].block_signing_key = init_pubkey;
 }
 
+
+
+void application_impl::set_api_limit() {
+   if (_options->count("api-limit-get-account-history-operations")) {
+      _app_options.api_limit_get_account_history_operations = _options->at("api-limit-get-account-history-operations").as<uint64_t>();
+   }
+   if(_options->count("api-limit-get-account-history")){
+      _app_options.api_limit_get_account_history = _options->at("api-limit-get-account-history").as<uint64_t>();
+   }
+   if(_options->count("api-limit-get-grouped-limit-orders")){
+      _app_options.api_limit_get_grouped_limit_orders = _options->at("api-limit-get-grouped-limit-orders").as<uint64_t>();
+   }
+   if(_options->count("api-limit-get-relative-account-history")){
+       _app_options.api_limit_get_relative_account_history = _options->at("api-limit-get-relative-account-history").as<uint64_t>();
+   }
+   if(_options->count("api-limit-get-account-history-by-operations")){
+       _app_options.api_limit_get_account_history_by_operations = _options->at("api-limit-get-account-history-by-operations").as<uint64_t>();
+   }
+   if(_options->count("api-limit-get-asset-holders")){
+       _app_options.api_limit_get_asset_holders = _options->at("api-limit-get-asset-holders").as<uint64_t>();
+   }
+   if(_options->count("api-limit-get-key-references")){
+       _app_options.api_limit_get_key_references = _options->at("api-limit-get-key-references").as<uint64_t>();
+   }
+   if(_options->count("api-limit-get-htlc-by")) {
+      _app_options.api_limit_get_htlc_by = _options->at("api-limit-get-htlc-by").as<uint64_t>();
+   }
+   if(_options->count("api-limit-get-full-accounts")) {
+      _app_options.api_limit_get_full_accounts = _options->at("api-limit-get-full-accounts").as<uint64_t>();
+   }
+   if(_options->count("api-limit-get-full-accounts-lists")) {
+      _app_options.api_limit_get_full_accounts_lists = _options->at("api-limit-get-full-accounts-lists").as<uint64_t>();
+   }
+   if(_options->count("api-limit-get-call-orders")) {
+      _app_options.api_limit_get_call_orders = _options->at("api-limit-get-call-orders").as<uint64_t>();
+   }
+   if(_options->count("api-limit-get-settle-orders")) {
+      _app_options.api_limit_get_settle_orders = _options->at("api-limit-get-settle-orders").as<uint64_t>();
+   }
+   if(_options->count("api-limit-get-assets")) {
+      _app_options.api_limit_get_assets = _options->at("api-limit-get-assets").as<uint64_t>();
+   }
+   if(_options->count("api-limit-get-limit-orders")){
+      _app_options.api_limit_get_limit_orders = _options->at("api-limit-get-limit-orders").as<uint64_t>();
+   }
+   if(_options->count("api-limit-get-order-book")){
+      _app_options.api_limit_get_order_book = _options->at("api-limit-get-order-book").as<uint64_t>();
+   }
+   if(_options->count("api-limit-list-htlcs")){
+      _app_options.api_limit_list_htlcs = _options->at("api-limit-list-htlcs").as<uint64_t>();
+   }
+}
+
 void application_impl::startup()
 { try {
    fc::create_directories(_data_dir / "blockchain");
@@ -335,8 +371,11 @@ void application_impl::startup()
             genesis.initial_timestamp -= ( genesis.initial_timestamp.sec_since_epoch()
                                            % genesis.initial_parameters.block_interval );
             modified_genesis = true;
-            std::cerr << "Used genesis timestamp:  " << genesis.initial_timestamp.to_iso_string()
-                      << " (PLEASE RECORD THIS)\n";
+
+            ilog(
+               "Used genesis timestamp:  ${timestamp} (PLEASE RECORD THIS)", 
+               ("timestamp", genesis.initial_timestamp.to_iso_string())
+            );
          }
          if( _options->count("dbg-init-key") )
          {
@@ -344,11 +383,11 @@ void application_impl::startup()
             FC_ASSERT( genesis.initial_witness_candidates.size() >= genesis.initial_active_witnesses );
             set_dbg_init_key( genesis, init_key );
             modified_genesis = true;
-            std::cerr << "Set init witness key to " << init_key << "\n";
+            ilog("Set init witness key to ${init_key}", ("init_key", init_key));
          }
          if( modified_genesis )
          {
-            std::cerr << "WARNING:  GENESIS WAS MODIFIED, YOUR CHAIN ID MAY BE DIFFERENT\n";
+            wlog("WARNING:  GENESIS WAS MODIFIED, YOUR CHAIN ID MAY BE DIFFERENT");
             genesis_str += "BOGUS";
             genesis.initial_chain_id = fc::sha256::hash( genesis_str );
          }
@@ -384,12 +423,39 @@ void application_impl::startup()
    }
    _chain_db->add_checkpoints( loaded_checkpoints );
 
-   if( _options->count("replay-blockchain") )
+   if( _options->count("enable-standby-votes-tracking") )
+   {
+      _chain_db->enable_standby_votes_tracking( _options->at("enable-standby-votes-tracking").as<bool>() );
+   }
+
+   if( _options->count("replay-blockchain") || _options->count("revalidate-blockchain") )
       _chain_db->wipe( _data_dir / "blockchain", false );
 
    try
    {
-      _chain_db->open( _data_dir / "blockchain", initial_state, GRAPHENE_CURRENT_DB_VERSION );
+      // these flags are used in open() only, i. e. during replay
+      uint32_t skip;
+      if( _options->count("revalidate-blockchain") ) // see also handle_block()
+      {
+         if( !loaded_checkpoints.empty() )
+            wlog( "Warning - revalidate will not validate before last checkpoint" );
+         if( _options->count("force-validate") )
+            skip = graphene::chain::database::skip_nothing;
+         else
+            skip = graphene::chain::database::skip_transaction_signatures;
+      }
+      else // no revalidate, skip most checks
+         skip = graphene::chain::database::skip_witness_signature |
+                graphene::chain::database::skip_block_size_check |
+                graphene::chain::database::skip_merkle_check |
+                graphene::chain::database::skip_transaction_signatures |
+                graphene::chain::database::skip_transaction_dupe_check |
+                graphene::chain::database::skip_tapos_check |
+                graphene::chain::database::skip_witness_schedule_check;
+
+      graphene::chain::detail::with_skip_flags( *_chain_db, skip, [this,&initial_state] () {
+         _chain_db->open( _data_dir / "blockchain", initial_state, GRAPHENE_CURRENT_DB_VERSION );
+      });
    }
    catch( const fc::exception& e )
    {
@@ -403,27 +469,24 @@ void application_impl::startup()
       _force_validate = true;
    }
 
-   // TODO uncomment this when GUI is ready
-   //if( _options->count("enable-subscribe-to-all") )
-   //   _app_options.enable_subscribe_to_all = _options->at("enable-subscribe-to-all").as<bool>();
+   if ( _options->count("enable-subscribe-to-all") )
+      _app_options.enable_subscribe_to_all = _options->at( "enable-subscribe-to-all" ).as<bool>();
+
+   set_api_limit();
 
    if( _active_plugins.find( "market_history" ) != _active_plugins.end() )
       _app_options.has_market_history_plugin = true;
 
    if( _options->count("api-access") ) {
 
-      if(fc::exists(_options->at("api-access").as<boost::filesystem::path>()))
-      {
-         _apiaccess = fc::json::from_file( _options->at("api-access").as<boost::filesystem::path>() ).as<api_access>( 20 );
-         ilog( "Using api access file from ${path}",
-               ("path", _options->at("api-access").as<boost::filesystem::path>().string()) );
-      }
-      else
-      {
-         elog("Failed to load file from ${path}",
-            ("path", _options->at("api-access").as<boost::filesystem::path>().string()));
-         std::exit(EXIT_FAILURE);
-      }
+      fc::path api_access_file = _options->at("api-access").as<boost::filesystem::path>();
+
+      FC_ASSERT( fc::exists(api_access_file), 
+            "Failed to load file from ${path}", ("path", api_access_file) );
+
+      _apiaccess = fc::json::from_file( api_access_file ).as<api_access>( 20 );
+      ilog( "Using api access file from ${path}",
+            ("path", api_access_file) );
    }
    else
    {
@@ -436,7 +499,6 @@ void application_impl::startup()
       wild_access.allowed_apis.push_back( "database_api" );
       wild_access.allowed_apis.push_back( "network_broadcast_api" );
       wild_access.allowed_apis.push_back( "history_api" );
-      wild_access.allowed_apis.push_back( "crypto_api" );
       wild_access.allowed_apis.push_back( "orders_api" );
       _apiaccess.permission_map["*"] = wild_access;
    }
@@ -497,24 +559,31 @@ bool application_impl::handle_block(const graphene::net::block_message& blk_msg,
       const auto& witness = blk_msg.block.witness(*_chain_db);
       const auto& witness_account = witness.witness_account(*_chain_db);
       auto last_irr = _chain_db->get_dynamic_global_properties().last_irreversible_block_num;
-      ilog("Got block: #${n} ${bid} time: ${t} latency: ${l} ms from: ${w}  irreversible: ${i} (-${d})",
+      ilog("Got block: #${n} ${bid} time: ${t} transaction(s): ${x} latency: ${l} ms from: ${w}  irreversible: ${i} (-${d})",
            ("t",blk_msg.block.timestamp)
            ("n", blk_msg.block.block_num())
            ("bid", blk_msg.block.id())
+           ("x", blk_msg.block.transactions.size())
            ("l", (latency.count()/1000))
            ("w",witness_account.name)
            ("i",last_irr)("d",blk_msg.block.block_num()-last_irr) );
    }
-   FC_ASSERT( (latency.count()/1000) > -5000, "Rejecting block with timestamp in the future" );
+   GRAPHENE_ASSERT( latency.count()/1000 > -5000,
+                    graphene::net::block_timestamp_in_future_exception,
+                    "Rejecting block with timestamp in the future", );
 
    try {
-      // TODO: in the case where this block is valid but on a fork that's too old for us to switch to,
-      // you can help the network code out by throwing a block_older_than_undo_history exception.
-      // when the net code sees that, it will stop trying to push blocks from that chain, but
-      // leave that peer connected so that they can get sync blocks from us
-      bool result = _chain_db->push_block( blk_msg.block,
-                                           (_is_block_producer | _force_validate) ?
-                                              database::skip_nothing : database::skip_transaction_signatures );
+      const uint32_t skip = (_is_block_producer | _force_validate) ?
+                               database::skip_nothing : database::skip_transaction_signatures;
+      bool result = valve.do_serial( [this,&blk_msg,skip] () {
+         _chain_db->precompute_parallel( blk_msg.block, skip ).wait();
+      }, [this,&blk_msg,skip] () {
+         // TODO: in the case where this block is valid but on a fork that's too old for us to switch to,
+         // you can help the network code out by throwing a block_older_than_undo_history exception.
+         // when the net code sees that, it will stop trying to push blocks from that chain, but
+         // leave that peer connected so that they can get sync blocks from us
+         return _chain_db->push_block( blk_msg.block, skip );
+      });
 
       // the block was accepted, so we now know all of the transactions contained in the block
       if (!sync_mode)
@@ -524,10 +593,12 @@ bool application_impl::handle_block(const graphene::net::block_message& blk_msg,
          // happens, there's no reason to fetch the transactions, so  construct a list of the
          // transaction message ids we no longer need.
          // during sync, it is unlikely that we'll see any old
+         contained_transaction_message_ids.reserve( contained_transaction_message_ids.size()
+                                                    + blk_msg.block.transactions.size() );
          for (const processed_transaction& transaction : blk_msg.block.transactions)
          {
             graphene::net::trx_message transaction_message(transaction);
-            contained_transaction_message_ids.push_back(graphene::net::message(transaction_message).id());
+            contained_transaction_message_ids.emplace_back(graphene::net::message(transaction_message).id());
          }
       }
 
@@ -562,6 +633,7 @@ void application_impl::handle_transaction(const graphene::net::trx_message& tran
       trx_count = 0;
    }
 
+   _chain_db->precompute_parallel( transaction_message.trx ).wait();
    _chain_db->push_transaction( transaction_message.trx );
 } FC_CAPTURE_AND_RETHROW( (transaction_message) ) }
 
@@ -936,21 +1008,49 @@ void application::set_program_options(boost::program_options::options_descriptio
          ("genesis-json", bpo::value<boost::filesystem::path>(), "File to read Genesis State from")
          ("dbg-init-key", bpo::value<string>(), "Block signing key to use for init witnesses, overrides genesis file")
          ("api-access", bpo::value<boost::filesystem::path>(), "JSON file specifying API permissions")
-         ("plugins", bpo::value<string>(), "Space-separated list of plugins to activate")
          ("io-threads", bpo::value<uint16_t>()->implicit_value(0), "Number of IO threads, default to 0 for auto-configuration")
-         // TODO uncomment this when GUI is ready
-         //("enable-subscribe-to-all", bpo::value<bool>()->implicit_value(false),
-         // "Whether allow API clients to subscribe to universal object creation and removal events")
+         ("enable-subscribe-to-all", bpo::value<bool>()->implicit_value(true),
+          "Whether allow API clients to subscribe to universal object creation and removal events")
+         ("enable-standby-votes-tracking", bpo::value<bool>()->implicit_value(true),
+          "Whether to enable tracking of votes of standby witnesses and committee members. "
+          "Set it to true to provide accurate data to API clients, set to false for slightly better performance.")
+         ("api-limit-get-account-history-operations",boost::program_options::value<uint64_t>()->default_value(100),
+          "For history_api::get_account_history_operations to set its default limit value as 100")
+         ("api-limit-get-account-history",boost::program_options::value<uint64_t>()->default_value(100),
+          "For history_api::get_account_history to set its default limit value as 100")
+         ("api-limit-get-grouped-limit-orders",boost::program_options::value<uint64_t>()->default_value(101),
+          "For orders_api::get_grouped_limit_orders to set its default limit value as 101")
+         ("api-limit-get-relative-account-history",boost::program_options::value<uint64_t>()->default_value(100),
+          "For history_api::get_relative_account_history to set its default limit value as 100")
+         ("api-limit-get-account-history-by-operations",boost::program_options::value<uint64_t>()->default_value(100),
+          "For history_api::get_account_history_by_operations to set its default limit value as 100")
+         ("api-limit-get-asset-holders",boost::program_options::value<uint64_t>()->default_value(100),
+          "For asset_api::get_asset_holders to set its default limit value as 100")
+         ("api-limit-get-key-references",boost::program_options::value<uint64_t>()->default_value(100),
+          "For database_api_impl::get_key_references to set its default limit value as 100")
+         ("api-limit-get-htlc-by",boost::program_options::value<uint64_t>()->default_value(100),
+          "For database_api_impl::get_htlc_by_from and get_htlc_by_to to set its default limit value as 100")
+         ("api-limit-get-full-accounts",boost::program_options::value<uint64_t>()->default_value(10),
+          "For database_api_impl::get_full_accounts to set its account default limit values as 10")
+         ("api-limit-get-full-accounts-lists",boost::program_options::value<uint64_t>()->default_value(100),
+          "For database_api_impl::get_full_accounts to set its lists default limit values as 100")
+         ("api-limit-get-call-orders",boost::program_options::value<uint64_t>()->default_value(300),
+          "For database_api_impl::get_call_orders and get_call_orders_by_account to set its default limit values as 300")
+         ("api-limit-get-settle-orders",boost::program_options::value<uint64_t>()->default_value(300),
+          "For database_api_impl::get_settle_orders and get_settle_orders_by_account to set its default limit values as 300")
+         ("api-limit-get-assets",boost::program_options::value<uint64_t>()->default_value(101),
+          "For database_api_impl::list_assets and get_assets_by_issuer to set its default limit values as 101")
+         ("api-limit-get-limit-orders",boost::program_options::value<uint64_t>()->default_value(300),
+          "For database_api_impl::get_limit_orders to set its default limit value as 300")
+         ("api-limit-get-order-book",boost::program_options::value<uint64_t>()->default_value(50),
+          "For database_api_impl::get_order_book to set its default limit value as 50")
          ;
    command_line_options.add(configuration_file_options);
    command_line_options.add_options()
-         ("create-genesis-json", bpo::value<boost::filesystem::path>(),
-          "Path to create a Genesis State at. If a well-formed JSON file exists at the path, it will be parsed and any "
-          "missing fields in a Genesis State will be added, and any unknown fields will be removed. If no file or an "
-          "invalid file is found, it will be replaced with an example Genesis State.")
-         ("replay-blockchain", "Rebuild object graph by replaying all blocks")
+         ("replay-blockchain", "Rebuild object graph by replaying all blocks without validation")
+         ("revalidate-blockchain", "Rebuild object graph by replaying all blocks with full validation")
          ("resync-blockchain", "Delete all blocks and re-sync with network from scratch")
-         ("force-validate", "Force validation of all transactions")
+         ("force-validate", "Force validation of all transactions during normal operation")
          ("genesis-timestamp", bpo::value<uint32_t>(),
           "Replace timestamp from genesis.json with current time plus this many seconds (experts only!)")
          ;
@@ -963,69 +1063,17 @@ void application::initialize(const fc::path& data_dir, const boost::program_opti
    my->_data_dir = data_dir;
    my->_options = &options;
 
-   if( options.count("create-genesis-json") )
-   {
-      fc::path genesis_out = options.at("create-genesis-json").as<boost::filesystem::path>();
-      genesis_state_type genesis_state = detail::create_example_genesis();
-      if( fc::exists(genesis_out) )
-      {
-         try {
-            genesis_state = fc::json::from_file(genesis_out).as<genesis_state_type>( 20 );
-         } catch(const fc::exception& e) {
-            std::cerr << "Unable to parse existing genesis file:\n" << e.to_string()
-                      << "\nWould you like to replace it? [y/N] ";
-            char response = std::cin.get();
-            if( toupper(response) != 'Y' )
-               return;
-         }
-
-         std::cerr << "Updating genesis state in file " << genesis_out.generic_string() << "\n";
-      } else {
-         std::cerr << "Creating example genesis state in file " << genesis_out.generic_string() << "\n";
-      }
-      fc::json::save_to_file(genesis_state, genesis_out);
-
-      std::exit(EXIT_SUCCESS);
-   }
-
    if ( options.count("io-threads") )
    {
       const uint16_t num_threads = options["io-threads"].as<uint16_t>();
       fc::asio::default_io_service_scope::set_num_threads(num_threads);
-   }
-
-   std::vector<string> wanted;
-   if( options.count("plugins") )
-   {
-      boost::split(wanted, options.at("plugins").as<std::string>(), [](char c){return c == ' ';});
-   }
-   else
-   {
-      wanted.push_back("witness");
-      wanted.push_back("account_history");
-      wanted.push_back("market_history");
-      wanted.push_back("grouped_orders");
-   }
-   int es_ah_conflict_counter = 0;
-   for (auto& it : wanted)
-   {
-      if(it == "account_history")
-         ++es_ah_conflict_counter;
-      if(it == "elasticsearch")
-         ++es_ah_conflict_counter;
-
-      if(es_ah_conflict_counter > 1) {
-         elog("Can't start program with elasticsearch and account_history plugin at the same time");
-         std::exit(EXIT_FAILURE);
-      }
-      if (!it.empty()) enable_plugin(it);
    }
 }
 
 void application::startup()
 {
    try {
-   my->startup();
+      my->startup();
    } catch ( const fc::exception& e ) {
       elog( "${e}", ("e",e.to_detail_string()) );
       throw;
@@ -1035,9 +1083,26 @@ void application::startup()
    }
 }
 
+void application::set_api_limit()
+{
+   try {
+      my->set_api_limit();
+   } catch ( const fc::exception& e ) {
+      elog( "${e}", ("e",e.to_detail_string()) );
+      throw;
+   } catch ( ... ) {
+      elog( "unexpected exception" );
+      throw;
+   }
+}
 std::shared_ptr<abstract_plugin> application::get_plugin(const string& name) const
 {
    return my->_active_plugins[name];
+}
+
+bool application::is_plugin_enabled(const string& name) const
+{
+   return !(my->_active_plugins.find(name) == my->_active_plugins.end());
 }
 
 net::node_ptr application::p2p_node()
@@ -1109,7 +1174,10 @@ void application::initialize_plugins( const boost::program_options::variables_ma
 void application::startup_plugins()
 {
    for( auto& entry : my->_active_plugins )
+   {
       entry.second->plugin_startup();
+      ilog( "Plugin ${name} started", ( "name", entry.second->plugin_name() ) );
+   }
    return;
 }
 

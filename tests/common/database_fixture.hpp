@@ -23,12 +23,16 @@
  */
 #pragma once
 
-#include <graphene/app/application.hpp>
-#include <graphene/chain/database.hpp>
 #include <fc/io/json.hpp>
-#include <fc/smart_ref_impl.hpp>
 
+#include <graphene/protocol/types.hpp>
+#include <graphene/protocol/market.hpp>
+
+#include <graphene/chain/committee_member_object.hpp>
+#include <graphene/chain/worker_object.hpp>
 #include <graphene/chain/operation_history_object.hpp>
+#include <graphene/chain/database.hpp>
+#include <graphene/app/application.hpp>
 #include <graphene/market_history/market_history_plugin.hpp>
 
 #include <iostream>
@@ -150,24 +154,33 @@ extern uint32_t GRAPHENE_TESTING_GENESIS_TIMESTAMP;
 
 #define PREP_ACTOR(name) \
    fc::ecc::private_key name ## _private_key = generate_private_key(BOOST_PP_STRINGIZE(name));   \
-   public_key_type name ## _public_key = name ## _private_key.get_public_key(); \
+   graphene::chain::public_key_type name ## _public_key = name ## _private_key.get_public_key(); \
    BOOST_CHECK( name ## _public_key != public_key_type() );
 
 #define ACTOR(name) \
    PREP_ACTOR(name) \
-   const auto& name = create_account(BOOST_PP_STRINGIZE(name), name ## _public_key); \
-   account_id_type name ## _id = name.id; (void)name ## _id;
+   const auto name = create_account(BOOST_PP_STRINGIZE(name), name ## _public_key); \
+   graphene::chain::account_id_type name ## _id = name.id; (void)name ## _id;
 
 #define GET_ACTOR(name) \
    fc::ecc::private_key name ## _private_key = generate_private_key(BOOST_PP_STRINGIZE(name)); \
    const account_object& name = get_account(BOOST_PP_STRINGIZE(name)); \
-   account_id_type name ## _id = name.id; \
+   graphene::chain::account_id_type name ## _id = name.id; \
    (void)name ##_id
 
 #define ACTORS_IMPL(r, data, elem) ACTOR(elem)
 #define ACTORS(names) BOOST_PP_SEQ_FOR_EACH(ACTORS_IMPL, ~, names)
 
+#define INITIAL_WITNESS_COUNT (9u)
+#define INITIAL_COMMITTEE_MEMBER_COUNT INITIAL_WITNESS_COUNT
+
 namespace graphene { namespace chain {
+
+class clearable_block : public signed_block {
+public:
+   /** @brief Clears internal cached values like ID, signing key, Merkle root etc. */
+   void clear();
+};
 
 struct database_fixture {
    // the reason we use an app is to exercise the indexes of built-in
@@ -185,15 +198,17 @@ struct database_fixture {
    optional<fc::temp_directory> data_dir;
    bool skip_key_index_test = false;
    uint32_t anon_acct_count;
+   bool hf1270 = false;
 
-   database_fixture();
+    database_fixture(const fc::time_point_sec &initial_timestamp =
+                        fc::time_point_sec(GRAPHENE_TESTING_GENESIS_TIMESTAMP));
    ~database_fixture();
 
    static fc::ecc::private_key generate_private_key(string seed);
    string generate_anon_acct_name();
    static void verify_asset_supplies( const database& db );
-   void verify_account_history_plugin_index( )const;
    void open_database();
+   void vote_for_committee_and_witnesses(uint16_t num_committee, uint16_t num_witness);
    signed_block generate_block(uint32_t skip = ~0,
                                const fc::ecc::private_key& key = generate_private_key("null_key"),
                                int miss_blocks = 0);
@@ -220,7 +235,7 @@ struct database_fixture {
       const std::string& name,
       const account_object& registrar,
       const account_object& referrer,
-      uint8_t referrer_percent = 100,
+      uint16_t referrer_percent = 100,
       public_key_type key = public_key_type()
       );
 
@@ -272,7 +287,8 @@ struct database_fixture {
                                        uint16_t market_fee_percent = 100 /*1%*/,
                                        uint16_t flags = charge_market_fee,
                                        uint16_t precision = 2,
-                                       asset_id_type backing_asset = {});
+                                       asset_id_type backing_asset = {},
+                                       share_type max_supply = GRAPHENE_MAX_SHARE_SUPPLY );
    const asset_object& create_prediction_market(const string& name,
                                        account_id_type issuer = GRAPHENE_WITNESS_ACCOUNT,
                                        uint16_t market_fee_percent = 100 /*1%*/,
@@ -284,7 +300,9 @@ struct database_fixture {
                                                  const account_object& issuer,
                                                  uint16_t flags,
                                                  const price& core_exchange_rate = price(asset(1, asset_id_type(1)), asset(1)),
-                                                 uint16_t precision = 2 /* traditional precision for tests */);
+                                                 uint8_t precision = 2 /* traditional precision for tests */,
+                                                 uint16_t market_fee_percent = 0,
+                                                 additional_asset_options_t options = additional_asset_options_t());
    void issue_uia( const account_object& recipient, asset amount );
    void issue_uia( account_id_type recipient_id, asset amount );
 
@@ -297,7 +315,7 @@ struct database_fixture {
       const string& name,
       const account_object& registrar,
       const account_object& referrer,
-      uint8_t referrer_percent = 100,
+      uint16_t referrer_percent = 100,
       const public_key_type& key = public_key_type()
       );
 
@@ -306,14 +324,16 @@ struct database_fixture {
       const private_key_type& key,
       const account_id_type& registrar_id = account_id_type(),
       const account_id_type& referrer_id = account_id_type(),
-      uint8_t referrer_percent = 100
+      uint16_t referrer_percent = 100
       );
 
    const committee_member_object& create_committee_member( const account_object& owner );
    const witness_object& create_witness(account_id_type owner,
-                                        const fc::ecc::private_key& signing_private_key = generate_private_key("null_key"));
+                                        const fc::ecc::private_key& signing_private_key = generate_private_key("null_key"),
+                                        uint32_t skip_flags = ~0);
    const witness_object& create_witness(const account_object& owner,
-                                        const fc::ecc::private_key& signing_private_key = generate_private_key("null_key"));
+                                        const fc::ecc::private_key& signing_private_key = generate_private_key("null_key"),
+                                        uint32_t skip_flags = ~0);
    const worker_object& create_worker(account_id_type owner, const share_type daily_pay = 1000, const fc::microseconds& duration = fc::days(2));
    uint64_t fund( const account_object& account, const asset& amount = asset(500000) );
    digest_type digest( const transaction& tx );
@@ -328,6 +348,10 @@ struct database_fixture {
    void transfer( account_id_type from, account_id_type to, const asset& amount, const asset& fee = asset() );
    void transfer( const account_object& from, const account_object& to, const asset& amount, const asset& fee = asset() );
    void fund_fee_pool( const account_object& from, const asset_object& asset_to_fund, const share_type amount );
+   /**
+    * NOTE: This modifies the database directly. You will probably have to call this each time you
+    * finish creating a block
+    */
    void enable_fees();
    void change_fees( const flat_set< fee_parameters >& new_params, uint32_t new_scale = 0 );
    void upgrade_to_lifetime_member( account_id_type account );
@@ -341,8 +365,32 @@ struct database_fixture {
    void print_joint_market( const string& syma, const string& symb )const;
    int64_t get_balance( account_id_type account, asset_id_type a )const;
    int64_t get_balance( const account_object& account, const asset_object& a )const;
+
+   int64_t get_market_fee_reward( account_id_type account, asset_id_type asset )const;
+   int64_t get_market_fee_reward( const account_object& account, const asset_object& asset )const;
+
    vector< operation_history_object > get_operation_history( account_id_type account_id )const;
    vector< graphene::market_history::order_history_object > get_market_order_history( asset_id_type a, asset_id_type b )const;
+
+   /****
+    * @brief return htlc fee parameters
+    */
+   flat_map< uint64_t, graphene::chain::fee_parameters > get_htlc_fee_parameters();
+   /****
+    * @brief push through a proposal that sets htlc parameters and fees
+    */
+   void set_htlc_committee_parameters();
+   /****
+    * Hash the preimage and put it in a vector
+    * @param preimage the preimage
+    * @returns a vector that cointains the sha256 hash of the preimage
+    */
+   template<typename H>
+   H hash_it(std::vector<char> preimage)
+   {
+      return H::hash( (char*)preimage.data(), preimage.size() );
+   }
+
 };
 
 namespace test {
